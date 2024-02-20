@@ -1168,8 +1168,12 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 #endif /* HAVE_TCP_KEEPALIVE */
 #if defined(HAVE_IPPROTO_MPTCP)
         {"mptcp", no_argument, NULL, 'm'},
-#if defined(HAVE_UDP_SEGMENT) || defined(HAVE_UDP_GRO)
-        {"gsro", no_argument, NULL, OPT_GSRO},
+#endif
+#if defined(HAVE_UDP_SEGMENT)
+        {"udp-gso", no_argument, NULL, OPT_UDP_GSO},
+#endif
+#if defined(HAVE_UDP_GRO)
+        {"udp-gro", no_argument, NULL, OPT_UDP_GRO},
 #endif
         {"debug", optional_argument, NULL, 'd'},
         {"help", no_argument, NULL, 'h'},
@@ -1715,14 +1719,16 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 	    case 'm':
 		set_protocol(test, Ptcp);
 		test->mptcp = 1;
-#if defined(HAVE_UDP_SEGMENT) || defined(HAVE_UDP_GRO)
-            case OPT_GSRO:
+		break;
+#endif
 #ifdef HAVE_UDP_SEGMENT
+            case OPT_UDP_GSO:
 		test->settings->gso = 1;
+                break;
 #endif
 #ifdef HAVE_UDP_GRO
+            case OPT_UDP_GRO:
 		test->settings->gro = 1;
-#endif
 		break;
 #endif
 	    case 'h':
@@ -1744,6 +1750,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         i_errno = IECLIENTONLY;
         return -1;
     }
+
 
 #if defined(HAVE_SSL)
 
@@ -1850,7 +1857,9 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
     if (test->protocol->id == Pudp && test->settings->gso) {
         test->settings->gso_dg_size = blksize;
         /* use the multiple of datagram size for the best efficiency. */
-        test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+        if (test->settings->gso_dg_size > 0) {
+            test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+        }
     }
 #endif
 
@@ -2503,7 +2512,9 @@ get_parameters(struct iperf_test *test)
 	    if (test->protocol->id == Pudp && test->settings->gso == 1) {
 	        test->settings->gso_dg_size = j_p->valueint;
 	        /* use the multiple of datagram size for the best efficiency. */
-	        test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+	        if (test->settings->gso_dg_size > 0) {
+	            test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+	        }
 	    }
 #endif
 	    test->settings->rate = j_p->valueint;
@@ -3159,12 +3170,12 @@ iperf_defaults(struct iperf_test *testp)
     testp->settings->pacing_timer = DEFAULT_PACING_TIMER;
     testp->settings->burst = 0;
 #ifdef HAVE_UDP_SEGMENT
-    testp->settings->gso = GSO_DEF;
+    testp->settings->gso = 0;
     testp->settings->gso_dg_size = 0;
     testp->settings->gso_bf_size = GSO_BF_MAX_SIZE;
 #endif
 #ifdef HAVE_UDP_GRO
-    testp->settings->gro = GRO_DEF;
+    testp->settings->gro = 0;
     testp->settings->gro_bf_size = GRO_BF_MAX_SIZE;
 #endif
     testp->settings->mss = 0;

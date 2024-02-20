@@ -373,6 +373,7 @@ AC_COMPILE_IFELSE(
   iperf3_cv_header_ipproto_mptcp=no))
 if test "x$iperf3_cv_header_ipproto_mptcp" = "xyes"; then
     AC_DEFINE([HAVE_IPPROTO_MPTCP], [1], [Have MPTCP protocol.])
+fi
 
 # Check for UDP_SEGMENT sockopt
 AC_CACHE_CHECK([UDP_SEGMENT socket option],

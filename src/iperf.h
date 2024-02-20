@@ -493,15 +493,7 @@ extern int gerror; /* error value from getaddrinfo(3), for use in internal error
 /* In Reverse mode, maximum number of packets to wait for "accept" response - to handle out of order packets */
 #define MAX_REVERSE_OUT_OF_ORDER_PACKETS 2
 
-#endif /* !__IPERF_H */
-
 #define GSO_BF_MAX_SIZE MAX_UDP_BLOCKSIZE
-#define GSO_DEF 0
-#ifndef UDP_SEGMENT
-#define UDP_SEGMENT 103
-#endif
 #define GRO_BF_MAX_SIZE MAX_UDP_BLOCKSIZE
-#define GRO_DEF 0
-#ifndef UDP_GRO
-#define UDP_GRO 104
-#endif
+
+#endif /* !__IPERF_H */

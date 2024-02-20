@@ -24,6 +24,8 @@
  * This code is distributed under a BSD style license, see the LICENSE
  * file for complete information.
  */
+#include "iperf_config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +40,9 @@
 #include <inttypes.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#if defined(HAVE_UDP_SEGMENT) || defined(HAVE_UDP_GRO)
 #include <linux/udp.h>
+#endif
 
 #include "iperf.h"
 #include "iperf_api.h"
@@ -73,16 +77,19 @@ iperf_udp_recv(struct iperf_stream *sp)
     }
 #endif /* HAVE_MSG_TRUNC */
 
-    r = Nrecv_no_select(sp->socket, sp->buffer, size, Pudp, sock_opt);
-
 #ifdef HAVE_UDP_GRO
     int       tmp_r;
     int       dgram_sz;
     int       cnt = 0;
     char      *dgram_buf;
+    char      *dgram_buf_end;
+    const int min_pkt_size = sizeof(uint32_t) * 3; /* sec + usec + pcount (32-bit) */
+
+    /* Initialize dgram_sz for both GRO enabled and disabled cases */
+    dgram_sz = sp->settings->blksize;
 
     if (sp->test->settings->gro) {
-	size = sp->settings->gro_bf_size;
+	size = sp->test->settings->gro_bf_size;
 	r = Nread_gro(sp->socket, sp->buffer, size, Pudp, &dgram_sz);
 	if (dgram_sz == -1) {
 	    /*
@@ -92,7 +99,19 @@ iperf_udp_recv(struct iperf_stream *sp)
 	     */
             dgram_sz = sp->settings->blksize;
 	}
-    } else
+	/* Validate dgram_sz against reasonable bounds */
+	if (dgram_sz <= 0 || dgram_sz < min_pkt_size || dgram_sz > sp->test->settings->gro_bf_size) {
+	    if (test->debug_level >= DEBUG_LEVEL_INFO)
+		printf("Invalid GRO dgram_sz %d, falling back to blksize %d\n", dgram_sz, sp->settings->blksize);
+	    dgram_sz = sp->settings->blksize;
+	}
+    } else {
+        /* GRO available but disabled - use normal UDP receive and single packet size */
+        r = Nrecv_no_select(sp->socket, sp->buffer, size, Pudp, sock_opt);
+        dgram_sz = sp->settings->blksize;
+    }
+#else
+    r = Nrecv_no_select(sp->socket, sp->buffer, size, Pudp, sock_opt);
 #endif
 
     /*
@@ -121,14 +140,32 @@ iperf_udp_recv(struct iperf_stream *sp)
 	    printf("received %d bytes of %d, total %" PRIu64 "\n", r, size, sp->result->bytes_received);
 
 #ifdef HAVE_UDP_GRO
-	dgram_buf = sp->buffer;
-	tmp_r = r;
-	while (tmp_r > 0) {
+	if (sp->test->settings->gro) {
+	    /* GRO enabled - process multiple datagrams */
+	    dgram_buf = sp->buffer;
+	    dgram_buf_end = sp->buffer + r;
+	    tmp_r = r;
+	    
+	    /* Ensure we process complete datagrams only */
+	    while (tmp_r >= dgram_sz && dgram_buf + dgram_sz <= dgram_buf_end) {
 	    cnt++;
 	    if (sp->test->debug)
 		printf("%d (%d) remaining %d\n", cnt, dgram_sz, tmp_r);
 
+	    /* Ensure we have enough bytes for the packet header */
+	    if (tmp_r < min_pkt_size) {
+		if (test->debug_level >= DEBUG_LEVEL_INFO)
+		    printf("Incomplete packet header: %d bytes remaining\n", tmp_r);
+		break;
+	    }
+
 	    if (sp->test->udp_counters_64bit) {
+		/* Verify we have enough space for 64-bit counter */
+		if (tmp_r < sizeof(uint32_t) * 2 + sizeof(uint64_t)) {
+		    if (test->debug_level >= DEBUG_LEVEL_INFO)
+			printf("Incomplete 64-bit packet: %d bytes remaining\n", tmp_r);
+		    break;
+		}
 		memcpy(&sec, dgram_buf, sizeof(sec));
 		memcpy(&usec, dgram_buf+4, sizeof(usec));
 		memcpy(&pcount, dgram_buf+8, sizeof(pcount));
@@ -149,8 +186,34 @@ iperf_udp_recv(struct iperf_stream *sp)
 		sent_time.secs = sec;
 		sent_time.usecs = usec;
 	    }
-	    dgram_buf += dgram_sz;
-	    tmp_r -= dgram_sz;
+		dgram_buf += dgram_sz;
+		tmp_r -= dgram_sz;
+	    } // end while loop
+	} else {
+	    /* GRO disabled - process as single normal UDP packet */
+	    /* Dig the various counters out of the incoming UDP packet */
+	    if (test->udp_counters_64bit) {
+		memcpy(&sec, sp->buffer, sizeof(sec));
+		memcpy(&usec, sp->buffer+4, sizeof(usec));
+		memcpy(&pcount, sp->buffer+8, sizeof(pcount));
+		sec = ntohl(sec);
+		usec = ntohl(usec);
+		pcount = be64toh(pcount);
+		sent_time.secs = sec;
+		sent_time.usecs = usec;
+	    }
+	    else {
+		uint32_t pc;
+		memcpy(&sec, sp->buffer, sizeof(sec));
+		memcpy(&usec, sp->buffer+4, sizeof(usec));
+		memcpy(&pc, sp->buffer+8, sizeof(pc));
+		sec = ntohl(sec);
+		usec = ntohl(usec);
+		pcount = ntohl(pc);
+		sent_time.secs = sec;
+		sent_time.usecs = usec;
+	    }
+	}
 #else
 	/* Dig the various counters out of the incoming UDP packet */
 	if (test->udp_counters_64bit) {
@@ -250,9 +313,6 @@ iperf_udp_recv(struct iperf_stream *sp)
 	    d = -d;
 	sp->prev_transit = transit;
 	sp->jitter += (d - sp->jitter) / 16.0;
-#ifdef HAVE_UDP_GRO
-	} // while (tmp_r > 0)
-#endif
     }
     else {
 	if (test->debug_level >= DEBUG_LEVEL_INFO)
@@ -279,21 +339,38 @@ iperf_udp_send(struct iperf_stream *sp)
     int       buf_sz;
     int       cnt = 0;
     char      *dgram_buf;
+    char      *dgram_buf_end;
+    const int min_pkt_size = sizeof(uint32_t) * 3; /* sec + usec + pcount (32-bit) */
 
     if (sp->test->settings->gso) {
-	dgram_sz = sp->settings->gso_dg_size;
-	buf_sz = sp->settings->gso_bf_size;
+	dgram_sz = sp->test->settings->gso_dg_size;
+	buf_sz = sp->test->settings->gso_bf_size;
+	/* Validate GSO parameters */
+	if (dgram_sz <= 0 || dgram_sz < min_pkt_size || dgram_sz > buf_sz) {
+	    if (sp->test->debug_level >= DEBUG_LEVEL_INFO)
+		printf("Invalid GSO dgram_sz %d for buf_sz %d, disabling GSO\n", dgram_sz, buf_sz);
+	    dgram_sz = buf_sz = size;
+	    sp->test->settings->gso = 0;  /* Disable GSO for safety */
+	}
     } else {
 	dgram_sz = buf_sz = size;
     }
 
     dgram_buf = sp->buffer;
+    dgram_buf_end = sp->buffer + buf_sz;
 
-    while (buf_sz > 0) {
+    while (buf_sz > 0 && dgram_buf + dgram_sz <= dgram_buf_end) {
 	    cnt++;
 
 	    if (sp->test->debug)
 		    printf("%d (%d) remaining %d\n", cnt, dgram_sz, buf_sz);
+
+	    /* Prevent buffer underflow */
+	    if (buf_sz < dgram_sz) {
+		if (sp->test->debug_level >= DEBUG_LEVEL_INFO)
+		    printf("Buffer underflow protection: buf_sz %d < dgram_sz %d\n", buf_sz, dgram_sz);
+		break;
+	    }
 
 	    iperf_time_now(&before);
 	    ++sp->packet_count;
@@ -327,6 +404,11 @@ iperf_udp_send(struct iperf_stream *sp)
 	    }
 	    dgram_buf += dgram_sz;
 	    buf_sz -= dgram_sz;
+    }
+    
+    /* Warn if we didn't process all the buffer due to size mismatch */
+    if (buf_sz > 0 && sp->test->debug_level >= DEBUG_LEVEL_INFO) {
+	printf("GSO: %d bytes remaining unprocessed\n", buf_sz);
     }
 #else
     iperf_time_now(&before);
@@ -364,7 +446,7 @@ iperf_udp_send(struct iperf_stream *sp)
 
 #ifdef HAVE_UDP_SEGMENT
     if (sp->test->settings->gso) {
-        size = sp->settings->gso_bf_size;
+        size = sp->test->settings->gso_bf_size;
         r = Nwrite_gso(sp->socket, sp->buffer, size, Pudp, sp->test->settings->gso_dg_size);
     } else
 #endif

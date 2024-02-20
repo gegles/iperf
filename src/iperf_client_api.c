@@ -520,7 +520,9 @@ iperf_connect(struct iperf_test *test)
     if (test->settings->gso) {
         test->settings->gso_dg_size = test->settings->blksize;
         /* use the multiple of datagram size for the best efficiency. */
-        test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+        if (test->settings->gso_dg_size > 0) {
+            test->settings->gso_bf_size = (test->settings->gso_bf_size / test->settings->gso_dg_size) * test->settings->gso_dg_size;
+        }
     }
 #endif
 

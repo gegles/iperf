@@ -38,7 +38,11 @@
 #include <string.h>
 #include <fcntl.h>
 #include <limits.h>
+#if defined(HAVE_UDP_SEGMENT) || defined(HAVE_UDP_GRO)
 #include <linux/udp.h>
+#endif
+
+#include "iperf.h"
 
 #ifdef HAVE_SENDFILE
 #ifdef linux
@@ -531,6 +535,11 @@ static int recv_msg_gro(int fd, char *buf, int len, int *gso_size)
 	uint16_t *gsosizeptr;
 	int ret;
 
+	/* Input validation */
+	if (!buf || len <= 0 || !gso_size) {
+		return -1;
+	}
+
 	iov.iov_base = buf;
 	iov.iov_len = len;
 
@@ -543,12 +552,18 @@ static int recv_msg_gro(int fd, char *buf, int len, int *gso_size)
 	*gso_size = -1;
 	ret = recvmsg(fd, &msg, MSG_DONTWAIT);
 
-	if (ret != -1) {
+	if (ret > 0) {
 		for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 			if (cmsg->cmsg_level == IPPROTO_UDP && cmsg->cmsg_type == UDP_GRO) {
-
-				gsosizeptr = (uint16_t *) CMSG_DATA(cmsg);
-				*gso_size = *gsosizeptr;
+				/* Validate cmsg data length */
+				if (cmsg->cmsg_len >= CMSG_LEN(sizeof(uint16_t))) {
+					gsosizeptr = (uint16_t *) CMSG_DATA(cmsg);
+					*gso_size = *gsosizeptr;
+					/* Sanity check the gso_size value */
+					if (*gso_size <= 0 || *gso_size > len) {
+						*gso_size = -1;  /* Mark as invalid */
+					}
+				}
 				break;
 			}
 		}
@@ -562,6 +577,16 @@ Nread_gro(int fd, char *buf, size_t count, int prot, int *dgram_sz)
 {
 	register ssize_t r;
 
+	/* Input validation */
+	if (!buf || count <= 0 || !dgram_sz) {
+		return NET_HARDERROR;
+	}
+
+	/* Limit maximum buffer size to prevent excessive memory usage */
+	if (count > MAX_UDP_BLOCKSIZE) {
+		count = MAX_UDP_BLOCKSIZE;
+	}
+
 	r = recv_msg_gro(fd, buf, count, dgram_sz);
 
 	if (r < 0) {
@@ -571,6 +596,12 @@ Nread_gro(int fd, char *buf, size_t count, int prot, int *dgram_sz)
 			printf("\nUnexpected error (%d)\n", errno);
 			return NET_HARDERROR;
 		}
+	}
+
+	/* Additional validation of returned dgram_sz */
+	if (r > 0 && *dgram_sz > 0 && *dgram_sz > r) {
+		/* dgram_sz shouldn't be larger than actual received data */
+		*dgram_sz = r;
 	}
 
 	return r;
@@ -627,7 +658,7 @@ static void udp_msg_gso(struct cmsghdr *cm, uint16_t gso_size)
 	*valp = gso_size;
 }
 
-static int udp_sendmsg_gso(int fd, const char *data, size_t count, uint16_t gso_size)
+static int udp_sendmsg_gso(int fd, const char *buf, size_t count, uint16_t gso_size)
 {
 	char control[CMSG_SPACE(sizeof(gso_size))] = {0};
 	struct msghdr msg = {0};
@@ -636,7 +667,7 @@ static int udp_sendmsg_gso(int fd, const char *data, size_t count, uint16_t gso_
 	struct cmsghdr *cmsg;
 	int ret;
 
-	iov.iov_base = data;
+	iov.iov_base = (void *) buf;
 	iov.iov_len = count;
 
 	msg.msg_iov = &iov;
